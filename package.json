@@ -1,0 +1,23 @@
+{
+  "name": "disposaphone",
+  "version": "1.0.0",
+  "description": "Your phone, but disposable - a web app that turns any phone into a single-use camera",
+  "type": "module",
+  "scripts": {
+    "dev": "npx serve .",
+    "build": "echo 'No build step required for static HTML'",
+    "lint": "echo 'No linter configured'",
+    "test": "echo 'No tests configured'"
+  },
+  "keywords": [
+    "camera",
+    "disposable",
+    "photography",
+    "vintage"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@vercel/analytics": "^2.0.1"
+  }
+}
