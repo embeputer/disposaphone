@@ -363,27 +363,38 @@
   }
 
   function handleStreamError(err) {
-    const detail =
-      err && typeof err === "object" && "message" in err
-        ? String(err.message)
-        : "unknown error";
-    let friendly = "we couldn't open the camera.";
-    if (err && /NotAllowed|Permission/i.test(err.name || "")) {
-      friendly =
-        "camera permission was blocked. enable it in your browser settings and try again.";
-    } else if (err && /NotFound/i.test(err.name || "")) {
-      friendly = "no camera found on this device.";
-    } else if (err && /NotReadable|TrackStart/i.test(err.name || "")) {
-      friendly =
-        "the camera is busy. close other apps using it and try again.";
-    } else if (
+    // only surface a visible warning when the cause is something the
+    // user can actually do something about. NotFoundError / unknown
+    // failures are usually transient (mid-init iOS quirks, sleeping
+    // camera, etc.) — keep loading silently rather than crying wolf.
+    const name = (err && err.name) || "";
+
+    if (/NotAllowed|Permission/i.test(name)) {
+      showCameraError(
+        "camera permission was blocked. enable it in your browser settings and try again.",
+        err && err.message
+      );
+      return;
+    }
+    if (/NotReadable|TrackStart/i.test(name)) {
+      showCameraError(
+        "the camera is busy. close other apps using it and try again.",
+        err && err.message
+      );
+      return;
+    }
+    if (
       location.protocol !== "https:" &&
       location.hostname !== "localhost"
     ) {
-      friendly =
-        "camera access requires HTTPS. open this page over https:// or on localhost.";
+      showCameraError(
+        "camera access requires HTTPS. open this page over https:// or on localhost.",
+        err && err.message
+      );
+      return;
     }
-    showCameraError(friendly, detail);
+    // anything else: log and stay quiet
+    console.warn("[disposaphone] camera init issue:", err);
   }
 
   function stopStream() {

@@ -839,6 +839,12 @@ button:disabled {
   letter-spacing: 0.16em;
 }
 
+.camera__hint:empty {
+  /* don't reserve space when there's no message to show */
+  margin: 0;
+  display: none;
+}
+
 /* =========================================================
    DEVELOPING
    ========================================================= */
