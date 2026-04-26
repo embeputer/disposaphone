@@ -11,9 +11,9 @@
 
   /* ---------- constants ---------- */
 
-  // working resolution per photo (kept reasonable so 24 photos fit in
-  // localStorage which is ~5MB on most browsers)
-  const PHOTO_SIZE = 1080;
+  // working resolution per photo. balance: bigger = sharper but slower
+  // filter passes & larger localStorage footprint (24 photos × ~140KB ≈ 3.4MB)
+  const PHOTO_SIZE = 960;
   const PHOTO_QUALITY = 0.82;
   const STORAGE_KEY = "disposaphone:roll:v1";
 
@@ -90,6 +90,18 @@
     stripBlob: null,
     stripFilename: "",
   };
+
+  // request-id for startStream() so a stale getUserMedia resolution
+  // can't clobber a newer one (real concern on iOS where the permission
+  // prompt fires visibilitychange and we get racy re-entries)
+  let streamRequestId = 0;
+  // visibility hide timer — gives a 2s grace period before tearing the
+  // stream down so brief prompt overlays don't kill it
+  let visibilityHideTimer = null;
+  // count of capture frames currently being processed in the background
+  let inFlightCount = 0;
+  // sequential queue so concurrent shots stay in order in the roll
+  let processingQueue = Promise.resolve();
 
   /* ---------- storage ---------- */
 
@@ -247,6 +259,20 @@
   }
 
   async function startStream() {
+    // already have a healthy stream? unhide UI and bail — avoids the
+    // double-start that happens when iOS fires visibilitychange while
+    // showing the permission prompt
+    if (
+      state.stream &&
+      state.stream.getVideoTracks().some((t) => t.readyState === "live")
+    ) {
+      showCameraLoading(false);
+      showCameraError(null);
+      els.shutterBtn.disabled = false;
+      return;
+    }
+
+    const myId = ++streamRequestId;
     stopStream();
     showCameraLoading(true);
     showCameraError(null);
@@ -263,51 +289,101 @@
     /** @type {MediaStreamConstraints} */
     const constraints = {
       audio: false,
-      video: {
-        facingMode: { ideal: facing },
-        width: { ideal: 1920 },
-        height: { ideal: 1920 },
-      },
+      video: { facingMode: { ideal: facing } },
     };
 
+    /** @type {MediaStream} */
+    let stream;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
-      state.stream = stream;
-      els.video.srcObject = stream;
-      els.video.classList.toggle("is-back", facing === "environment");
-
-      await new Promise((resolve) => {
-        if (els.video.readyState >= 2) return resolve(null);
-        els.video.onloadedmetadata = () => resolve(null);
-      });
-      try {
-        await els.video.play();
-      } catch {
-        // autoplay can be cranky on some devices, ignore — we have user gesture later
-      }
-
-      showCameraLoading(false);
-      els.shutterBtn.disabled = false;
+      stream = await getUserMediaResilient(constraints);
     } catch (err) {
-      const detail =
-        err && typeof err === "object" && "message" in err
-          ? String(err.message)
-          : "unknown error";
-      let friendly = "we couldn't open the camera.";
-      if (err && /NotAllowed|Permission/i.test(err.name || "")) {
-        friendly =
-          "camera permission was blocked. enable it in your browser settings and try again.";
-      } else if (err && /NotFound/i.test(err.name || "")) {
-        friendly = "no camera found on this device.";
-      } else if (err && /NotReadable|TrackStart/i.test(err.name || "")) {
-        friendly =
-          "the camera is busy. close other apps using it and try again.";
-      } else if (location.protocol !== "https:" && location.hostname !== "localhost") {
-        friendly =
-          "camera access requires HTTPS. open this page over https:// or on localhost.";
-      }
-      showCameraError(friendly, detail);
+      // a newer call superseded us — keep quiet
+      if (myId !== streamRequestId) return;
+      handleStreamError(err);
+      return;
     }
+
+    // a newer call took over while we were awaiting — drop this stream
+    if (myId !== streamRequestId) {
+      stream.getTracks().forEach((t) => t.stop());
+      return;
+    }
+
+    state.stream = stream;
+    els.video.srcObject = stream;
+    els.video.classList.toggle("is-back", facing === "environment");
+
+    await new Promise((resolve) => {
+      if (els.video.readyState >= 2) return resolve(null);
+      els.video.onloadedmetadata = () => resolve(null);
+    });
+    try {
+      await els.video.play();
+    } catch {
+      // autoplay can be cranky; we have a user gesture (the shutter) later
+    }
+
+    if (myId !== streamRequestId) return; // bail if superseded
+    showCameraLoading(false);
+    showCameraError(null);
+    els.shutterBtn.disabled = false;
+  }
+
+  // wrap getUserMedia with a one-shot retry on transient errors and a
+  // relaxed-constraint fallback if facingMode can't be honored
+  async function getUserMediaResilient(constraints) {
+    const transient = /NotFound|NotReadable|TrackStart|Aborted/i;
+    try {
+      return await navigator.mediaDevices.getUserMedia(constraints);
+    } catch (err) {
+      // transient — wait a beat and try once more
+      if (err && transient.test(err.name || "")) {
+        await wait(500);
+        try {
+          return await navigator.mediaDevices.getUserMedia(constraints);
+        } catch (err2) {
+          err = err2;
+        }
+      }
+      // facingMode unmet? drop it entirely and ask for any camera
+      if (
+        err &&
+        /Overconstrained|NotFound/i.test(err.name || "") &&
+        constraints.video &&
+        typeof constraints.video === "object" &&
+        constraints.video.facingMode
+      ) {
+        return await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: true,
+        });
+      }
+      throw err;
+    }
+  }
+
+  function handleStreamError(err) {
+    const detail =
+      err && typeof err === "object" && "message" in err
+        ? String(err.message)
+        : "unknown error";
+    let friendly = "we couldn't open the camera.";
+    if (err && /NotAllowed|Permission/i.test(err.name || "")) {
+      friendly =
+        "camera permission was blocked. enable it in your browser settings and try again.";
+    } else if (err && /NotFound/i.test(err.name || "")) {
+      friendly = "no camera found on this device.";
+    } else if (err && /NotReadable|TrackStart/i.test(err.name || "")) {
+      friendly =
+        "the camera is busy. close other apps using it and try again.";
+    } else if (
+      location.protocol !== "https:" &&
+      location.hostname !== "localhost"
+    ) {
+      friendly =
+        "camera access requires HTTPS. open this page over https:// or on localhost.";
+    }
+    showCameraError(friendly, detail);
   }
 
   function stopStream() {
@@ -341,6 +417,9 @@
       state.roll.facingMode =
         state.roll.facingMode === "environment" ? "user" : "environment";
       saveRoll();
+      // explicitly tear down so startStream doesn't short-circuit
+      // on the "already healthy" guard
+      stopStream();
       await startStream();
     });
     els.endRollBtn.addEventListener("click", () => {
@@ -370,44 +449,82 @@
       els.counter.textContent = "--";
       return;
     }
-    const left = state.roll.rollSize - state.roll.photos.length;
+    // count completed + in-flight so the counter reflects what the
+    // user has fired even before the filter finishes processing
+    const used = state.roll.photos.length + inFlightCount;
+    const left = Math.max(0, state.roll.rollSize - used);
     els.counter.textContent = String(left).padStart(2, "0");
+  }
+
+  function rollIsFull() {
+    return (
+      !!state.roll &&
+      state.roll.photos.length + inFlightCount >= state.roll.rollSize
+    );
   }
 
   async function onShutter() {
     if (state.capturing || !state.roll) return;
-    if (state.roll.photos.length >= state.roll.rollSize) return;
+    if (rollIsFull()) return;
     if (!state.stream) return;
 
     state.capturing = true;
+
+    // grab the raw frame synchronously — this is fast (~5-15ms even on
+    // slow phones) so the visual feedback fires immediately
+    const frame = grabRawFrame();
+    if (!frame) {
+      // video isn't ready yet; abort silently, no flash, no click
+      state.capturing = false;
+      return;
+    }
+
+    // instant feedback now that we have the frame
+    flashEffect();
+    shutterPulse();
+    shutterClick();
+    vibrate(30);
+
+    inFlightCount++;
+    updateCounter();
     els.shutterBtn.disabled = true;
 
-    try {
-      flashEffect();
-      shutterPulse();
-      shutterClick();
-      vibrate(30);
-
-      const dataUrl = await capturePhoto();
-      state.roll.photos.push(dataUrl);
-      saveRoll();
-      updateCounter();
-
-      if (state.roll.photos.length >= state.roll.rollSize) {
-        finishRoll();
-        return;
+    // re-enable the shutter quickly (not waiting for filter to finish)
+    // so the user can keep firing — disposable-camera vibes
+    setTimeout(() => {
+      state.capturing = false;
+      if (!rollIsFull()) {
+        els.shutterBtn.disabled = false;
       }
-    } catch (err) {
-      console.error("[disposaphone] capture failed:", err);
-    } finally {
-      // small delay before re-enabling, more "mechanical"
-      setTimeout(() => {
-        state.capturing = false;
-        if (state.roll && state.roll.photos.length < state.roll.rollSize) {
+    }, 220);
+
+    // queue the heavy filter work sequentially so photos stay in order
+    const slotIdx = state.roll.photos.length + inFlightCount - 1;
+    const myTurn = processingQueue.then(() => processFrame(frame, slotIdx));
+    processingQueue = myTurn.catch(() => {}); // keep the queue alive on errors
+
+    myTurn.then(
+      (dataUrl) => {
+        inFlightCount--;
+        if (!state.roll) return;
+        state.roll.photos.push(dataUrl);
+        saveRoll();
+        updateCounter();
+        if (state.roll.photos.length >= state.roll.rollSize) {
+          finishRoll();
+        } else if (!state.capturing) {
           els.shutterBtn.disabled = false;
         }
-      }, 350);
-    }
+      },
+      (err) => {
+        inFlightCount--;
+        console.error("[disposaphone] capture failed:", err);
+        updateCounter();
+        if (!rollIsFull() && !state.capturing) {
+          els.shutterBtn.disabled = false;
+        }
+      }
+    );
   }
 
   function flashEffect() {
@@ -467,13 +584,15 @@
 
   /* ---------- capture pipeline (vintage camera filter) ---------- */
 
-  async function capturePhoto() {
+  // fast: grab a center-cropped square frame from the video to a canvas.
+  // this runs synchronously on tap so the user gets immediate feedback;
+  // the heavy filter work happens in processFrame() afterwards.
+  function grabRawFrame() {
     const video = els.video;
     const vw = video.videoWidth;
     const vh = video.videoHeight;
-    if (!vw || !vh) throw new Error("video not ready");
+    if (!vw || !vh) return null;
 
-    // 1) draw center-cropped square from the video at high res
     const side = Math.min(vw, vh);
     const sx = (vw - side) / 2;
     const sy = (vh - side) / 2;
@@ -485,7 +604,7 @@
       alpha: false,
       willReadFrequently: true,
     });
-    if (!ctx) throw new Error("2d context unavailable");
+    if (!ctx) return null;
 
     if (state.roll?.facingMode === "user") {
       ctx.translate(PHOTO_SIZE, 0);
@@ -493,16 +612,40 @@
     }
     ctx.drawImage(video, sx, sy, side, side, 0, 0, PHOTO_SIZE, PHOTO_SIZE);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
+    return canvas;
+  }
 
-    // vintage filter pipeline
-    applyVintageGrade(ctx, PHOTO_SIZE, PHOTO_SIZE);
-    applyHalation(ctx, PHOTO_SIZE, PHOTO_SIZE);
-    applyLightLeak(ctx, PHOTO_SIZE, PHOTO_SIZE, leakCornerForRoll());
-    applyVignette(ctx, PHOTO_SIZE, PHOTO_SIZE, 0.55);
-    applyGrain(ctx, PHOTO_SIZE, PHOTO_SIZE, 16);
-    drawDateStamp(ctx, PHOTO_SIZE, PHOTO_SIZE, new Date());
+  // slow: apply the full vintage filter and encode as JPEG.
+  // chunked between rAF yields so the UI stays responsive on phones.
+  async function processFrame(canvas, slotIdx) {
+    const ctx = canvas.getContext("2d", {
+      alpha: false,
+      willReadFrequently: true,
+    });
+    if (!ctx) throw new Error("2d context unavailable");
+    const w = canvas.width;
+    const h = canvas.height;
+
+    await rafYield();
+    applyVintageGrade(ctx, w, h);
+    await rafYield();
+    applyHalation(ctx, w, h);
+    applyLightLeak(ctx, w, h, cornerForSlot(slotIdx));
+    applyVignette(ctx, w, h, 0.55);
+    await rafYield();
+    applyGrain(ctx, w, h, 16);
+    drawDateStamp(ctx, w, h, new Date());
+    await rafYield();
 
     return canvas.toDataURL("image/jpeg", PHOTO_QUALITY);
+  }
+
+  function rafYield() {
+    return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+  }
+
+  function cornerForSlot(idx) {
+    return ["top-right", "bottom-left", "top-left", "bottom-right"][idx % 4];
   }
 
   // ----- vintage color grade -----
@@ -584,20 +727,23 @@
   }
 
   // ----- halation: bright pixels glow warm/orange (film bloom) -----
+  // optimized: do the mask + blur on a 1/4-scale canvas (16x fewer pixels),
+  // then upscale on composite. visually nearly identical, much faster.
   function applyHalation(ctx, w, h) {
-    // copy current canvas to a temp, mask to highlights tinted orange
-    const tmp = document.createElement("canvas");
-    tmp.width = w; tmp.height = h;
-    const tctx = tmp.getContext("2d", { willReadFrequently: true });
-    tctx.drawImage(ctx.canvas, 0, 0);
+    const SMALL = Math.max(120, Math.round(w / 4));
 
-    const id = tctx.getImageData(0, 0, w, h);
+    const tmp = document.createElement("canvas");
+    tmp.width = SMALL;
+    tmp.height = SMALL;
+    const tctx = tmp.getContext("2d", { willReadFrequently: true });
+    tctx.drawImage(ctx.canvas, 0, 0, SMALL, SMALL);
+
+    const id = tctx.getImageData(0, 0, SMALL, SMALL);
     const d = id.data;
     for (let i = 0; i < d.length; i += 4) {
       const lum = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
       const t = Math.max(0, lum - 170) / 85; // 170-255 -> 0-1
       const mask = Math.min(1, t * t);
-      // warm orange tint
       d[i]     = 255;
       d[i + 1] = 130 + 40 * mask;
       d[i + 2] = 60  + 20 * mask;
@@ -605,36 +751,25 @@
     }
     tctx.putImageData(id, 0, 0);
 
-    // blur the highlights via canvas filter
     const blurred = document.createElement("canvas");
-    blurred.width = w; blurred.height = h;
+    blurred.width = SMALL;
+    blurred.height = SMALL;
     const bctx = blurred.getContext("2d");
     if ("filter" in bctx) {
-      bctx.filter = `blur(${Math.round(w * 0.025)}px)`;
+      bctx.filter = `blur(${Math.max(2, Math.round(SMALL * 0.04))}px)`;
       bctx.drawImage(tmp, 0, 0);
     } else {
-      // fallback: cheap fake-blur via downscale + upscale
-      const tiny = document.createElement("canvas");
-      tiny.width = Math.round(w / 12); tiny.height = Math.round(h / 12);
-      tiny.getContext("2d").drawImage(tmp, 0, 0, tiny.width, tiny.height);
-      bctx.imageSmoothingEnabled = true;
-      bctx.imageSmoothingQuality = "high";
-      bctx.drawImage(tiny, 0, 0, w, h);
+      // fallback: the 1/4 downscale already smooths things; upscale will blur further
+      bctx.drawImage(tmp, 0, 0);
     }
 
-    // composite glow
     ctx.save();
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
     ctx.globalCompositeOperation = "screen";
     ctx.globalAlpha = 0.55;
-    ctx.drawImage(blurred, 0, 0);
+    ctx.drawImage(blurred, 0, 0, SMALL, SMALL, 0, 0, w, h);
     ctx.restore();
-  }
-
-  // ----- light leak: warm wedge from a corner -----
-  function leakCornerForRoll() {
-    // deterministic per-shot rotation so a single roll feels coherent but varied
-    const idx = (state.roll?.photos.length ?? 0) % 4;
-    return ["top-right", "bottom-left", "top-left", "bottom-right"][idx];
   }
 
   function applyLightLeak(ctx, w, h, corner) {
@@ -720,8 +855,14 @@
 
   async function finishRoll() {
     if (!state.roll) return;
+    // guard against double-entry (auto-develop + manual button)
+    if (screens.developing.classList.contains("is-active")) return;
     stopStream();
     showScreen("developing");
+
+    // wait for any in-flight filter processing to land in the roll
+    // (sequential queue, so this resolves once the last shot is encoded)
+    await processingQueue.catch(() => {});
 
     // animated progress that doubles as actual rendering time
     const photos = state.roll.photos.slice();
@@ -1016,6 +1157,8 @@
       state.roll = null;
       state.stripBlob = null;
       state.stripFilename = "";
+      inFlightCount = 0;
+      processingQueue = Promise.resolve();
       clearStoredRoll();
       setRollIdx(ROLL_DEFAULT_IDX, { animate: false });
       els.resumeNotice.hidden = true;
@@ -1027,11 +1170,23 @@
   /* ---------- visibility / cleanup ---------- */
 
   document.addEventListener("visibilitychange", () => {
-    // pause stream when tab hidden (saves battery, prevents overheating)
     if (document.hidden) {
-      stopStream();
-    } else if (screens.camera.classList.contains("is-active")) {
-      startStream();
+      // 2-second grace period — tolerates brief overlays like the
+      // permission prompt without tearing the stream down
+      visibilityHideTimer = setTimeout(() => {
+        stopStream();
+      }, 2000);
+    } else {
+      if (visibilityHideTimer) {
+        clearTimeout(visibilityHideTimer);
+        visibilityHideTimer = null;
+      }
+      if (
+        screens.camera.classList.contains("is-active") &&
+        !state.stream
+      ) {
+        startStream();
+      }
     }
   });
 
