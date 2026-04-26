@@ -135,11 +135,6 @@
             <div class="viewfinder__loading" id="cameraLoading">
               <span>loading lens…</span>
             </div>
-            <div class="viewfinder__error" id="cameraError" hidden>
-              <p>we can't reach your camera.</p>
-              <p class="viewfinder__error-detail" id="cameraErrorDetail"></p>
-              <button id="retryBtn" class="btn btn--ghost">try again</button>
-            </div>
           </div>
 
           <div class="camera__controls">
@@ -187,13 +182,45 @@
             </h2>
           </header>
 
+          <div
+            class="dev-style-picker"
+            role="tablist"
+            aria-label="develop style"
+          >
+            <button
+              class="dev-style-pill is-active"
+              role="tab"
+              aria-selected="true"
+              data-style="strip"
+            >
+              strip
+            </button>
+            <button
+              class="dev-style-pill"
+              role="tab"
+              aria-selected="false"
+              data-style="collage"
+            >
+              collage
+            </button>
+            <button
+              class="dev-style-pill"
+              role="tab"
+              aria-selected="false"
+              data-style="photos"
+            >
+              photos
+            </button>
+          </div>
+
           <div class="strip-stage">
             <canvas id="stripCanvas" class="strip-canvas"></canvas>
+            <div id="photosGrid" class="photos-grid" hidden></div>
           </div>
 
           <div class="strip-actions">
             <button id="downloadBtn" class="btn btn--primary">
-              <span>save the strip</span>
+              <span id="downloadBtnLabel">save the strip</span>
               <span class="btn__arrow" aria-hidden="true">↓</span>
             </button>
             <button id="shareBtn" class="btn btn--ghost" hidden>

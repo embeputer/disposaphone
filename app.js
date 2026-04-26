@@ -62,16 +62,16 @@
     flipBtn: $("#flipBtn"),
     endRollBtn: $("#endRollBtn"),
     cameraLoading: $("#cameraLoading"),
-    cameraError: $("#cameraError"),
-    cameraErrorDetail: $("#cameraErrorDetail"),
-    retryBtn: $("#retryBtn"),
     cameraHint: $("#cameraHint"),
 
     developingSub: $("#developingSub"),
     developingBar: document.querySelector(".developing__bar"),
 
     stripCanvas: $("#stripCanvas"),
+    photosGrid: $("#photosGrid"),
+    devStylePicker: document.querySelector(".dev-style-picker"),
     downloadBtn: $("#downloadBtn"),
+    downloadBtnLabel: $("#downloadBtnLabel"),
     shareBtn: $("#shareBtn"),
     newRollBtn: $("#newRollBtn"),
   };
@@ -89,6 +89,13 @@
     /** @type {Blob | null} */
     stripBlob: null,
     stripFilename: "",
+    /** developed images cached so we can recompose styles without reloading */
+    /** @type {HTMLImageElement[]} */
+    developed: [],
+    /** @type {"strip"|"collage"|"photos"} */
+    devStyle: "strip",
+    /** rollSize captured at finishRoll for footer text on collage */
+    devRollSize: 0,
   };
 
   // request-id for startStream() so a stale getUserMedia resolution
@@ -98,6 +105,8 @@
   // visibility hide timer — gives a 2s grace period before tearing the
   // stream down so brief prompt overlays don't kill it
   let visibilityHideTimer = null;
+  // silent retry timer for transient stream failures
+  let streamRetryTimer = null;
   // count of capture frames currently being processed in the background
   let inFlightCount = 0;
   // sequential queue so concurrent shots stay in order in the roll
@@ -267,20 +276,17 @@
       state.stream.getVideoTracks().some((t) => t.readyState === "live")
     ) {
       showCameraLoading(false);
-      showCameraError(null);
       els.shutterBtn.disabled = false;
       return;
     }
 
+    cancelStreamRetry();
     const myId = ++streamRequestId;
     stopStream();
     showCameraLoading(true);
-    showCameraError(null);
 
     if (!navigator.mediaDevices?.getUserMedia) {
-      showCameraError(
-        "your browser doesn't support camera access. try Safari or Chrome on a phone."
-      );
+      console.warn("[disposaphone] getUserMedia is not available");
       return;
     }
 
@@ -325,7 +331,6 @@
 
     if (myId !== streamRequestId) return; // bail if superseded
     showCameraLoading(false);
-    showCameraError(null);
     els.shutterBtn.disabled = false;
   }
 
@@ -363,41 +368,40 @@
   }
 
   function handleStreamError(err) {
-    // only surface a visible warning when the cause is something the
-    // user can actually do something about. NotFoundError / unknown
-    // failures are usually transient (mid-init iOS quirks, sleeping
-    // camera, etc.) — keep loading silently rather than crying wolf.
-    const name = (err && err.name) || "";
-
-    if (/NotAllowed|Permission/i.test(name)) {
-      showCameraError(
-        "camera permission was blocked. enable it in your browser settings and try again.",
-        err && err.message
-      );
-      return;
-    }
-    if (/NotReadable|TrackStart/i.test(name)) {
-      showCameraError(
-        "the camera is busy. close other apps using it and try again.",
-        err && err.message
-      );
-      return;
-    }
-    if (
-      location.protocol !== "https:" &&
-      location.hostname !== "localhost"
-    ) {
-      showCameraError(
-        "camera access requires HTTPS. open this page over https:// or on localhost.",
-        err && err.message
-      );
-      return;
-    }
-    // anything else: log and stay quiet
+    // never show a visible warning. log for devs, and silently retry
+    // on transient failures so the camera tends to "just come up" once
+    // permission is granted / the camera is free.
     console.warn("[disposaphone] camera init issue:", err);
+    const name = (err && err.name) || "";
+    // permission denied is a hard stop until the user changes browser
+    // settings — no point retrying, the call would just keep failing
+    if (/NotAllowed|Permission/i.test(name)) return;
+    scheduleStreamRetry();
+  }
+
+  function scheduleStreamRetry() {
+    if (streamRetryTimer) clearTimeout(streamRetryTimer);
+    streamRetryTimer = setTimeout(() => {
+      streamRetryTimer = null;
+      if (
+        screens.camera.classList.contains("is-active") &&
+        !state.stream &&
+        !document.hidden
+      ) {
+        startStream();
+      }
+    }, 2500);
+  }
+
+  function cancelStreamRetry() {
+    if (streamRetryTimer) {
+      clearTimeout(streamRetryTimer);
+      streamRetryTimer = null;
+    }
   }
 
   function stopStream() {
+    cancelStreamRetry();
     if (state.stream) {
       state.stream.getTracks().forEach((t) => t.stop());
       state.stream = null;
@@ -407,18 +411,6 @@
 
   function showCameraLoading(loading) {
     els.cameraLoading.classList.toggle("is-hidden", !loading);
-  }
-
-  function showCameraError(msg, detail) {
-    if (msg) {
-      els.cameraError.hidden = false;
-      els.cameraError.querySelector("p").textContent = msg;
-      els.cameraErrorDetail.textContent = detail || "";
-      showCameraLoading(false);
-      els.shutterBtn.disabled = true;
-    } else {
-      els.cameraError.hidden = true;
-    }
   }
 
   function bindCameraControls() {
@@ -450,7 +442,6 @@
       }
       finishRoll();
     });
-    els.retryBtn.addEventListener("click", () => startStream());
   }
 
   /* ---------- shutter ---------- */
@@ -875,7 +866,6 @@
     // (sequential queue, so this resolves once the last shot is encoded)
     await processingQueue.catch(() => {});
 
-    // animated progress that doubles as actual rendering time
     const photos = state.roll.photos.slice();
     const rollSize = state.roll.rollSize;
 
@@ -901,25 +891,20 @@
     setBar(0.2);
     await wait(500);
 
-    // load all images in parallel
+    // load all images in parallel — cache them so style switches don't
+    // re-decode the JPEG dataURLs every time
     setBar(0.35);
-    const imgs = await Promise.all(photos.map(loadImage));
+    state.developed = await Promise.all(photos.map(loadImage));
+    state.devRollSize = rollSize;
     setBar(0.6);
     await wait(400);
 
-    // build the strip
-    const { canvas, blob } = await composeStrip(imgs, rollSize);
+    // default style: strip
+    state.devStyle = "strip";
+    setActiveStylePill("strip");
+    await renderDevelopStyle("strip");
     setBar(0.9);
     await wait(500);
-
-    // copy to display canvas
-    const dst = els.stripCanvas;
-    dst.width = canvas.width;
-    dst.height = canvas.height;
-    dst.getContext("2d").drawImage(canvas, 0, 0);
-
-    state.stripBlob = blob;
-    state.stripFilename = makeFilename();
 
     setBar(1);
     await wait(500);
@@ -927,16 +912,98 @@
 
     showScreen("strip");
 
-    // configure share button if supported
+    // clear persisted roll — user has the artifact(s) now
+    clearStoredRoll();
+  }
+
+  /* ---------- develop styles ---------- */
+
+  async function renderDevelopStyle(style) {
+    state.devStyle = style;
+    const imgs = state.developed;
+    const rollSize = state.devRollSize;
+    if (!imgs || imgs.length === 0) return;
+
+    // reset state
+    els.shareBtn.hidden = true;
+    state.stripBlob = null;
+    state.stripFilename = "";
+
+    if (style === "photos") {
+      // hide canvas, render the grid
+      els.stripCanvas.style.display = "none";
+      els.photosGrid.hidden = false;
+      renderPhotosGrid(imgs);
+      els.downloadBtnLabel.textContent =
+        imgs.length === 1 ? "save the photo" : "save all photos";
+      return;
+    }
+
+    // canvas-based styles
+    els.photosGrid.hidden = true;
+    els.stripCanvas.style.display = "";
+
+    // update label + canvas sizing BEFORE the await so the UI feels
+    // snappy when switching tabs (compose can take ~500ms)
+    let canvas, blob, filenameSuffix;
+    if (style === "collage") {
+      filenameSuffix = "collage";
+      els.stripCanvas.classList.add("is-wide");
+      els.downloadBtnLabel.textContent = "save the collage";
+      ({ canvas, blob } = await composeCollage(imgs, rollSize));
+    } else {
+      filenameSuffix = "strip";
+      els.stripCanvas.classList.remove("is-wide");
+      els.downloadBtnLabel.textContent = "save the strip";
+      ({ canvas, blob } = await composeStrip(imgs, rollSize));
+    }
+
+    // copy to display canvas
+    const dst = els.stripCanvas;
+    dst.width = canvas.width;
+    dst.height = canvas.height;
+    dst.getContext("2d").drawImage(canvas, 0, 0);
+    // restart the drop animation
+    dst.style.animation = "none";
+    void dst.offsetWidth;
+    dst.style.animation = "";
+
+    state.stripBlob = blob;
+    state.stripFilename = makeFilename(filenameSuffix);
+
     if (navigator.canShare && blob) {
-      const file = new File([blob], state.stripFilename, { type: "image/jpeg" });
+      const file = new File([blob], state.stripFilename, {
+        type: "image/jpeg",
+      });
       if (navigator.canShare({ files: [file] })) {
         els.shareBtn.hidden = false;
       }
     }
+  }
 
-    // clear persisted roll — user has the artifact now
-    clearStoredRoll();
+  function setActiveStylePill(style) {
+    els.devStylePicker.querySelectorAll(".dev-style-pill").forEach((p) => {
+      const active = p.dataset.style === style;
+      p.classList.toggle("is-active", active);
+      p.setAttribute("aria-selected", active ? "true" : "false");
+    });
+  }
+
+  function renderPhotosGrid(imgs) {
+    els.photosGrid.innerHTML = "";
+    imgs.forEach((img, i) => {
+      const btn = document.createElement("button");
+      btn.className = "photos-grid__item";
+      btn.type = "button";
+      btn.setAttribute("aria-label", `save photo ${i + 1}`);
+      const tag = document.createElement("img");
+      tag.src = img.src;
+      tag.alt = `photo ${i + 1}`;
+      tag.draggable = false;
+      btn.appendChild(tag);
+      btn.addEventListener("click", () => downloadOnePhoto(img, i));
+      els.photosGrid.appendChild(btn);
+    });
   }
 
   function wait(ms) {
@@ -993,6 +1060,149 @@
 
     // footer
     drawFooter(ctx, totalH, n, rollSize);
+
+    const blob = await new Promise((resolve) =>
+      canvas.toBlob((b) => resolve(b), "image/jpeg", 0.92)
+    );
+
+    return { canvas, blob };
+  }
+
+  /* ---------- collage composition ---------- */
+
+  // pick (cols, rows) for n photos — landscape-leaning so collages
+  // feel distinct from the vertical photobooth strip
+  function collageGrid(n) {
+    if (n <= 1) return { cols: 1, rows: 1 };
+    if (n <= 2) return { cols: 2, rows: 1 };
+    if (n <= 4) return { cols: 2, rows: 2 };
+    if (n <= 6) return { cols: 3, rows: 2 };
+    if (n <= 8) return { cols: 4, rows: 2 };
+    if (n <= 12) return { cols: 4, rows: 3 };
+    if (n <= 16) return { cols: 4, rows: 4 };
+    if (n <= 20) return { cols: 5, rows: 4 };
+    return { cols: 6, rows: 4 }; // 24
+  }
+
+  // tiny deterministic prng so a given roll always tilts the same way
+  function mulberry32(seed) {
+    return function () {
+      let t = (seed += 0x6d2b79f5);
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  async function composeCollage(images, rollSize) {
+    const n = images.length;
+    const { cols, rows } = collageGrid(n);
+
+    const PHOTO = 360;
+    const GAP = 26;
+    const HPAD = 44;
+    const HEADER = 130;
+    const FOOTER = 96;
+
+    const innerW = cols * PHOTO + (cols - 1) * GAP;
+    const innerH = rows * PHOTO + (rows - 1) * GAP;
+    const totalW = innerW + 2 * HPAD;
+    const totalH = innerH + HEADER + FOOTER;
+
+    const canvas = document.createElement("canvas");
+    canvas.width = totalW;
+    canvas.height = totalH;
+    const ctx = canvas.getContext("2d", {
+      alpha: false,
+      willReadFrequently: true,
+    });
+
+    // paper bg with the same warm gradient as the strip
+    const bgGrad = ctx.createLinearGradient(0, 0, 0, totalH);
+    bgGrad.addColorStop(0, "#f8ebc7");
+    bgGrad.addColorStop(0.5, STRIP.paper);
+    bgGrad.addColorStop(1, "#f0dfb1");
+    ctx.fillStyle = bgGrad;
+    ctx.fillRect(0, 0, totalW, totalH);
+    addPaperNoise(ctx, totalW, totalH);
+
+    // header (centered)
+    ctx.save();
+    ctx.textAlign = "center";
+    ctx.fillStyle = STRIP.ink;
+    ctx.font =
+      "italic 400 60px 'Fraunces', 'Iowan Old Style', Georgia, serif";
+    ctx.fillText("disposaphone", totalW / 2, 78);
+    ctx.fillStyle = STRIP.accent;
+    ctx.fillRect(totalW / 2 - 40, 94, 80, 2);
+    ctx.fillStyle = "#6e5230";
+    ctx.font = "600 13px 'Fraunces', 'Iowan Old Style', Georgia, serif";
+    ctx.fillText(
+      formatDate(new Date()).toUpperCase().split("").join(" "),
+      totalW / 2,
+      118
+    );
+    ctx.restore();
+
+    // photos: each tilted slightly with a soft drop shadow
+    const rand = mulberry32(0x1d05a + n);
+    const startX = HPAD;
+    const startY = HEADER;
+    for (let i = 0; i < n; i++) {
+      const r = Math.floor(i / cols);
+      const c = i % cols;
+      const cx = startX + c * (PHOTO + GAP) + PHOTO / 2;
+      const cy = startY + r * (PHOTO + GAP) + PHOTO / 2;
+      // -3.5° to +3.5° tilt — different per photo, but stable per roll
+      const tilt = ((rand() - 0.5) * 7 * Math.PI) / 180;
+
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(tilt);
+      // shadow under the white border
+      ctx.shadowColor = "rgba(31, 22, 16, 0.22)";
+      ctx.shadowBlur = 18;
+      ctx.shadowOffsetY = 6;
+
+      const b = STRIP.photoBorder; // white border around each photo
+      ctx.fillStyle = "#fffaf0";
+      const half = PHOTO / 2;
+      ctx.fillRect(-half - b, -half - b, PHOTO + b * 2, PHOTO + b * 2);
+
+      // image (no shadow on the bitmap itself)
+      ctx.shadowColor = "transparent";
+      ctx.drawImage(images[i], -half, -half, PHOTO, PHOTO);
+
+      // subtle inner edge
+      ctx.strokeStyle = "rgba(31, 22, 16, 0.10)";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(-half + 0.5, -half + 0.5, PHOTO - 1, PHOTO - 1);
+
+      ctx.restore();
+    }
+
+    // footer
+    ctx.save();
+    ctx.textAlign = "center";
+    const fy = totalH - FOOTER;
+    ctx.fillStyle = "#6e5230";
+    ctx.font = "600 13px 'Fraunces', 'Iowan Old Style', Georgia, serif";
+    ctx.fillText(
+      `${String(n).padStart(2, "0")}  /  ${String(rollSize).padStart(2, "0")}   E X P O S U R E S`,
+      totalW / 2,
+      fy + 36
+    );
+    ctx.fillStyle = STRIP.accent;
+    ctx.fillRect(totalW / 2 - 26, fy + 50, 52, 1.5);
+    ctx.fillStyle = "#8a6e44";
+    ctx.font =
+      "italic 500 13px 'Fraunces', 'Iowan Old Style', Georgia, serif";
+    ctx.fillText(
+      "developed at home  ·  one of one",
+      totalW / 2,
+      fy + 76
+    );
+    ctx.restore();
 
     const blob = await new Promise((resolve) =>
       canvas.toBlob((b) => resolve(b), "image/jpeg", 0.92)
@@ -1126,27 +1336,67 @@
     return `${day} ${m} ${y}`;
   }
 
-  function makeFilename() {
+  function makeFilename(suffix) {
     const d = new Date();
     const pad = (n) => String(n).padStart(2, "0");
-    return `disposaphone-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}.jpg`;
+    const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}`;
+    const tag = suffix ? `-${suffix}` : "";
+    return `disposaphone-${stamp}${tag}.jpg`;
   }
 
-  /* ---------- strip actions ---------- */
+  /* ---------- strip / result actions ---------- */
+
+  function downloadBlob(blob, filename) {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = filename || "disposaphone.jpg";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  }
+
+  async function downloadOnePhoto(img, idx) {
+    const blob = await imageToBlob(img);
+    if (!blob) return;
+    const stamp = makeFilename(`photo-${String(idx + 1).padStart(2, "0")}`);
+    downloadBlob(blob, stamp);
+  }
+
+  // turn an HTMLImageElement (loaded from a JPEG dataURL) back into a Blob
+  async function imageToBlob(img) {
+    const c = document.createElement("canvas");
+    c.width = img.naturalWidth;
+    c.height = img.naturalHeight;
+    const cx = c.getContext("2d", { alpha: false });
+    cx.drawImage(img, 0, 0);
+    return new Promise((resolve) =>
+      c.toBlob((b) => resolve(b), "image/jpeg", 0.92)
+    );
+  }
+
+  async function downloadAllPhotos() {
+    const imgs = state.developed;
+    if (!imgs || imgs.length === 0) return;
+    // sequential with a small gap so browsers don't dedupe / drop calls
+    for (let i = 0; i < imgs.length; i++) {
+      await downloadOnePhoto(imgs[i], i);
+      await wait(220);
+    }
+  }
 
   function bindStripActions() {
-    els.downloadBtn.addEventListener("click", () => {
+    els.downloadBtn.addEventListener("click", async () => {
+      if (state.devStyle === "photos") {
+        await downloadAllPhotos();
+        return;
+      }
       if (!state.stripBlob) return;
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(state.stripBlob);
-      a.download = state.stripFilename || "disposaphone.jpg";
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+      downloadBlob(state.stripBlob, state.stripFilename);
     });
 
     els.shareBtn.addEventListener("click", async () => {
+      if (state.devStyle === "photos") return; // share doesn't apply
       if (!state.stripBlob || !navigator.canShare) return;
       const file = new File(
         [state.stripBlob],
@@ -1164,16 +1414,35 @@
       }
     });
 
+    // style picker
+    els.devStylePicker.addEventListener("click", (e) => {
+      const btn = e.target.closest(".dev-style-pill");
+      if (!btn) return;
+      const style = btn.dataset.style;
+      if (!style || style === state.devStyle) return;
+      setActiveStylePill(style);
+      renderDevelopStyle(style);
+    });
+
     els.newRollBtn.addEventListener("click", () => {
       state.roll = null;
       state.stripBlob = null;
       state.stripFilename = "";
+      state.developed = [];
+      state.devRollSize = 0;
+      state.devStyle = "strip";
       inFlightCount = 0;
       processingQueue = Promise.resolve();
       clearStoredRoll();
       setRollIdx(ROLL_DEFAULT_IDX, { animate: false });
       els.resumeNotice.hidden = true;
       els.shareBtn.hidden = true;
+      els.photosGrid.hidden = true;
+      els.photosGrid.innerHTML = "";
+      els.stripCanvas.style.display = "";
+      els.stripCanvas.classList.remove("is-wide");
+      setActiveStylePill("strip");
+      els.downloadBtnLabel.textContent = "save the strip";
       showScreen("intro");
     });
   }

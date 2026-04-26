@@ -30,10 +30,18 @@ No accounts. No upload. Everything runs in your browser, on your device.
 - Automatic recovery — if the tab is closed mid-roll, you can pick up where
   you left off (photos are stored locally in `localStorage`).
 - "Developing" animation with a glowing yellow safelight, amber progress bar,
-  and rotating darkroom status messages. Then a composed photobooth strip on
-  cream paper with perforations, an italic "disposaphone" header, the date,
-  and white-bordered photos.
-- Save the strip as a JPEG, share via the Web Share API on supported devices.
+  and rotating darkroom status messages.
+- **Three develop styles** you can flip between on the result page after the
+  roll lands — same photos, three artifacts:
+  - **Strip** — vertical photobooth strip on cream paper with perforations,
+    italic "disposaphone" header, the date, and white-bordered photos.
+  - **Collage** — landscape grid (2×2 / 4×2 / 4×3 / 6×4 depending on roll
+    size) with each photo at a slight, deterministic random tilt and a soft
+    drop shadow, like pictures laid out on a scrapbook page.
+  - **Photos** — just the individual photos as a tappable grid; tap any
+    photo to download it, or use "save all photos" to grab the whole set.
+- Save the current style as a JPEG, share via the Web Share API on supported
+  devices.
 - Front/rear camera switch.
 - Synthesized shutter click (no audio assets needed) and a haptic buzz on
   mobile.
