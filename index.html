@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1"
+    />
+    <meta name="theme-color" content="#1e0904" />
+    <meta
+      name="description"
+      content="Disposaphone — turn your phone into a disposable camera. Snap a roll, and we'll develop it into a photobooth strip."
+    />
+    <meta property="og:title" content="Disposaphone — your phone, but disposable" />
+    <meta
+      property="og:description"
+      content="A small roll of square photos, a vintage filter, and a photobooth strip at the end. No accounts. No upload."
+    />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary" />
+
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="apple-touch-icon" href="/favicon.svg" />
+
+    <title>Disposaphone — your phone, but disposable</title>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght,SOFT@0,9..144,300..900,0..100;1,9..144,300..900,0..100&display=swap"
+      rel="stylesheet"
+    />
+
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="grain" aria-hidden="true"></div>
+
+    <main id="app">
+      <!-- ============ INTRO ============ -->
+      <section class="screen screen--intro is-active" data-screen="intro">
+        <div class="intro">
+          <p class="intro__eyebrow">est. right now &middot; 35mm of pure nostalgia</p>
+          <h1 class="intro__title">
+            <span class="intro__title-line">Disposa</span>
+            <span class="intro__title-line intro__title-line--italic">phone</span>
+          </h1>
+          <p class="intro__lede">
+            Your phone, but disposable. Take a small roll of square photos —
+            you can't peek. When the roll runs out, we'll develop everything
+            into a photobooth strip you can keep forever.
+          </p>
+
+          <div class="roll-picker" role="group" aria-label="Choose your roll size">
+            <p class="roll-picker__label">choose your roll</p>
+
+            <div class="roll-display" aria-live="polite">
+              <span class="roll-display__num" id="rollDisplayNum">8</span>
+              <span class="roll-display__sub" id="rollDisplaySub">classic</span>
+            </div>
+
+            <div class="roll-slider" id="rollSliderRoot">
+              <input
+                id="rollSlider"
+                class="roll-slider__input"
+                type="range"
+                min="0"
+                max="3"
+                step="1"
+                value="1"
+                aria-label="roll size"
+                aria-valuetext="8, classic"
+              />
+              <div class="roll-slider__rail" id="rollRail" aria-hidden="true">
+                <span class="roll-slider__indicator" id="rollIndicator">
+                  <span class="roll-slider__indicator-arrow"></span>
+                </span>
+              </div>
+              <div class="roll-slider__nums" id="rollNums" aria-hidden="true">
+                <span class="roll-slider__num" data-i="0" style="--p: 0%">4</span>
+                <span class="roll-slider__num" data-i="1" style="--p: 33.333%">8</span>
+                <span class="roll-slider__num" data-i="2" style="--p: 66.667%">12</span>
+                <span class="roll-slider__num" data-i="3" style="--p: 100%">24</span>
+              </div>
+            </div>
+          </div>
+
+          <button id="startBtn" class="btn btn--primary">
+            <span>load the film</span>
+            <span class="btn__arrow" aria-hidden="true">→</span>
+          </button>
+
+          <p id="resumeNotice" class="intro__resume" hidden>
+            you have an unfinished roll —
+            <button id="resumeBtn" class="link">pick up where you left off</button>
+            &middot;
+            <button id="discardBtn" class="link link--quiet">start fresh</button>
+          </p>
+
+          <p class="intro__legal">
+            we never upload your photos. everything happens on your device.
+          </p>
+        </div>
+      </section>
+
+      <!-- ============ CAMERA ============ -->
+      <section class="screen screen--camera" data-screen="camera">
+        <div class="camera">
+          <header class="camera__header">
+            <div class="camera__brand">
+              <span class="camera__brand-dot" aria-hidden="true"></span>
+              <span class="camera__brand-name">DISPOSAPHONE</span>
+              <span class="camera__brand-spec">&middot; 35mm &middot; ASA 400</span>
+            </div>
+            <button id="flipBtn" class="icon-btn" aria-label="flip camera" title="flip camera">
+              <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+                <path
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.6"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  d="M4 8h11l-2-2M20 16H9l2 2M7 4h10a3 3 0 0 1 3 3v3M17 20H7a3 3 0 0 1-3-3v-3"
+                />
+              </svg>
+            </button>
+          </header>
+
+          <div class="viewfinder" id="viewfinder">
+            <video id="video" autoplay playsinline muted></video>
+            <div class="viewfinder__crosshair" aria-hidden="true">
+              <span></span><span></span><span></span><span></span>
+            </div>
+            <div class="viewfinder__flash" id="flash" aria-hidden="true"></div>
+            <div class="viewfinder__loading" id="cameraLoading">
+              <span>loading lens…</span>
+            </div>
+            <div class="viewfinder__error" id="cameraError" hidden>
+              <p>we can't reach your camera.</p>
+              <p class="viewfinder__error-detail" id="cameraErrorDetail"></p>
+              <button id="retryBtn" class="btn btn--ghost">try again</button>
+            </div>
+          </div>
+
+          <div class="camera__controls">
+            <div class="counter">
+              <span class="counter__label">SHOTS</span>
+              <span class="counter__value" id="counter">--</span>
+            </div>
+
+            <button
+              id="shutterBtn"
+              class="shutter"
+              aria-label="take photo"
+              disabled
+            ></button>
+
+            <button id="endRollBtn" class="end-roll" title="develop now">
+              <span>develop</span>
+            </button>
+          </div>
+
+          <p class="camera__hint" id="cameraHint">
+            you can't preview your shots. that's the point.
+          </p>
+        </div>
+      </section>
+
+      <!-- ============ DEVELOPING ============ -->
+      <section class="screen screen--developing" data-screen="developing">
+        <div class="developing">
+          <div class="developing__lamp" aria-hidden="true"></div>
+          <div class="developing__paper">
+            <div class="developing__bar"></div>
+          </div>
+          <h2 class="developing__title">developing your roll</h2>
+          <p class="developing__sub" id="developingSub">do not open the darkroom door</p>
+        </div>
+      </section>
+
+      <!-- ============ STRIP ============ -->
+      <section class="screen screen--strip" data-screen="strip">
+        <div class="strip-wrap">
+          <header class="strip-header">
+            <p class="strip-header__eyebrow">your roll, developed</p>
+            <h2 class="strip-header__title">
+              <span>fresh from the</span>
+              <span class="strip-header__italic">darkroom</span>
+            </h2>
+          </header>
+
+          <div class="strip-stage">
+            <canvas id="stripCanvas" class="strip-canvas"></canvas>
+          </div>
+
+          <div class="strip-actions">
+            <button id="downloadBtn" class="btn btn--primary">
+              <span>save the strip</span>
+              <span class="btn__arrow" aria-hidden="true">↓</span>
+            </button>
+            <button id="shareBtn" class="btn btn--ghost" hidden>
+              <span>share</span>
+            </button>
+            <button id="newRollBtn" class="btn btn--quiet">
+              <span>load a new camera</span>
+            </button>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>
